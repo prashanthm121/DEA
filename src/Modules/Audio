@@ -1,0 +1,220 @@
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using Discord;
+using Discord.Commands;
+using Discord.Audio;
+using Discord.WebSocket;
+using System.Runtime.InteropServices;
+using System.Diagnostics;
+using Google.Apis.Auth.OAuth2;
+using Google.Apis.Services;
+using Google.Apis.Upload;
+using Google.Apis.Util.Store;
+using Google.Apis.YouTube.v3;
+using Google.Apis.YouTube.v3.Data;
+
+namespace deabot
+{
+    public class AudioModule : ModuleBase
+    {
+        private Process CreateStream(string url)
+        {
+            Process currentsong = new Process();
+
+            currentsong.StartInfo = new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/C youtube-dl.exe -o - {url} | ffmpeg -i pipe:0 -ac 2 -f s16le -ar 48000 pipe:1",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+
+            currentsong.Start();
+            return currentsong;
+        }
+
+        static IAudioClient client;
+        static List<string> songList = new List<string>();
+        static List<string> queue = new List<string>();
+        static List<string> skipList = new List<string>();
+        static bool playing = false;
+        static int skipCount;
+        static string title;
+        static AudioOutStream stream;
+
+        [Command("play", RunMode = RunMode.Async)]
+        [Summary("Plays a song !")]
+        public async Task Play([Remainder] string url)
+        {
+            if (!url.Contains("youtube.com") || !url.Contains("youtu.be"))
+            {
+                await SearchVideos(url);
+                url = videosYoutube[0];
+                videosYoutube = new List<string>();
+            }
+            else
+                await GetTitle(url);
+
+            if (client == null)
+            {
+                IVoiceChannel channel = (Context.User as IVoiceState).VoiceChannel;
+                client = await channel.ConnectAsync();
+            }
+            if (songList.Contains(url))
+                await ReplyAsync("Song is already in queue !");
+            else
+            {
+                songList.Add(url);
+                queue.Add($"**{title}** - Requested by **{Context.User.Username}** !");
+                await ReplyAsync($"**{title}** was added to queue !");
+            }
+
+            if (!playing)
+                await LaunchStream(songList[0], client);
+        }
+
+        [Command("queue")]
+        [Summary("Give the queue content if there is one")]
+        public async Task Queue()
+        {
+            if (queue.Count == 0)
+                await ReplyAsync("Nothing queued.");
+            else
+            {
+                var embed = new EmbedBuilder();
+                embed.Title = "Here are the songs queued:\n";
+                foreach (string s in queue)
+                    embed.Description = ":small_blue_diamond:" + s + "\n";
+                embed.Color = new Color(255, 199, 87);
+                await ReplyAsync("",false,embed);
+            }
+        }
+
+        [Command("skip", RunMode = RunMode.Async)]
+        [Summary("Skip the actual song")]
+        public async Task Skip()
+        {
+            if (!playing)
+            {
+                await ReplyAsync("The bot is not even playing a song !!");
+                return;
+            }
+                await ReplyAsync($"song was skipped !");
+                songList.Remove(songList[0]);
+                if (songList.Count == 0)
+                {
+                    await client.StopAsync();
+                    Offine();
+                }
+                else
+                {
+                    stream.Clear();
+                    await LaunchStream(songList[0], client);
+                }
+            }
+
+        [Command("stop", RunMode = RunMode.Async)]
+        [Summary("Stop the bot if he's playing audio")]
+        public async Task Stop()
+        {
+            await client.StopAsync();
+            Offine();
+        }
+
+        public async Task LaunchStream(string url, IAudioClient client)
+        {
+            playing = true;
+            await ReplyAsync($":headphones: | Now playing: {queue[0]}");
+            queue.RemoveAt(0);
+            var output = CreateStream(url).StandardOutput.BaseStream;
+            stream = client.CreatePCMStream(AudioApplication.Music, 128 * 1024);
+            await output.CopyToAsync(stream);
+            await stream.FlushAsync();
+
+            if (songList.Count <= 1)
+            {
+                await client.StopAsync();
+                Offine();
+            }
+            else
+            {
+                songList.Remove(url);
+                await LaunchStream(songList[0], client);
+            }
+        }
+
+        private void Offine()
+        {
+            songList = new List<string>();
+            queue = new List<string>();
+            skipList = new List<string>();
+            playing = false;
+            skipCount = 0;
+            client = null;
+            title = "";
+        }
+
+
+
+        static List<string> videosYoutube = new List<string>();
+        static List<string> titleList = new List<string>();
+
+        public async Task SearchVideos([Remainder] string research)
+        {
+            var youtubeService = new YouTubeService(new BaseClientService.Initializer()
+            {
+                ApiKey = Data.Credentials.YoutubeAPIKey, //i hope this works :)
+                ApplicationName = GetType().ToString()
+            });
+
+            var searchListRequest = youtubeService.Search.List("snippet");
+            searchListRequest.Q = research;
+            searchListRequest.MaxResults = 10;
+
+            var searchListResponse = await searchListRequest.ExecuteAsync();
+
+            foreach (var searchResult in searchListResponse.Items)
+            {
+                switch (searchResult.Id.Kind)
+                {
+                    case "youtube#video":
+                        videosYoutube.Add(String.Format($"https://www.youtube.com/watch?v={searchResult.Id.VideoId}"));
+                        titleList.Add(String.Format($"{searchResult.Snippet.Title}"));
+                        break;
+                }
+            }
+            title = titleList[0];
+            titleList = new List<string>();
+        }
+
+        public async Task GetTitle([Remainder] string url)
+        {
+            var youtubeService = new YouTubeService(new BaseClientService.Initializer()
+            {
+                ApiKey = " Data.Credentials.YoutubeAPIKey", 
+                ApplicationName = GetType().ToString()
+            });
+
+            var searchListRequest = youtubeService.Search.List("snippet");
+            searchListRequest.Q = url;
+            var searchListResponse = await searchListRequest.ExecuteAsync();
+
+            foreach (var searchResult in searchListResponse.Items)
+            {
+                switch (searchResult.Id.Kind)
+                {
+                    case "youtube#video":
+                        titleList.Add(String.Format($"{searchResult.Snippet.Title}"));
+                        break;
+                }
+            }
+            title = titleList[0];
+            videosYoutube = new List<string>();
+            titleList = new List<string>();
+        }
+    }
+
+}
